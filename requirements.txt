@@ -1,0 +1,8 @@
+streamlit
+pandas
+nba_api
+streamlit-pydantic
+scikit-learn
+scipy
+requests
+beautifulsoup4
