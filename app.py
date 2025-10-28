@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# NBA Player Report Streamlit App - Final Version with BBR Scraping
+# NBA Player Report Streamlit App - Final and Stable Version (BBR Advanced Scraping)
 
 import pandas as pd
 import streamlit as st
@@ -22,7 +22,6 @@ BBR_DELAY = 4  # <-- BBR 要求較高的延遲時間 (4秒)
 # I. 數據獲取與處理的核心邏輯
 # ====================================================================
 
-# [此處省略 get_player_id, get_precise_positions, analyze_style 函數]
 @st.cache_data
 def get_player_id(player_name):
     """根據球員姓名查找其唯一的 Player ID (使用 Streamlit 緩存)"""
@@ -37,7 +36,7 @@ def get_player_id(player_name):
         return None
 
 def get_precise_positions(generic_position):
-    """將 NBA API 返回的通用位置轉換為所有精確位置。"""
+    """將 NBA API 返回的通用位置（Guard, F-C 等）轉換為所有精確位置（PG, SG, SF, PF, C）。"""
     position_map = {
         'Guard': ['PG', 'SG'], 'Forward': ['SF', 'PF'], 'Center': ['C'],
         'G-F': ['PG', 'SG', 'SF'], 'F-G': ['SG', 'SF', 'PF'], 'F-C': ['SF', 'PF', 'C'],
@@ -78,17 +77,14 @@ def analyze_style(stats, position):
 
     return {'core_style': core_style, 'simple_rating': simple_rating}
 
-
 # ======================================
 # II. 傳統爬蟲函數 (Basketball-Reference)
 # ======================================
 
 def get_bbr_player_slug(player_name):
-    """將 NBA 名稱轉換為 BBR 格式的 Slug (例如 Jayson Tatum -> tatumja01)"""
+    """將 NBA 名稱轉換為 BBR 格式的 Slug (例如 Jayson Tatum -> tatumja01)。"""
     # 這是爬取 BBR 的關鍵步驟，但由於無法在單一函數中完全自動化，這裡使用一個簡化/模擬的 slug
-    # 實際使用時，最好從 BBR 的全名單中預先爬取並儲存 Player Slug
-    
-    # 這裡我們只返回一個佔位符，因為真正的 slug 獲取非常複雜
+    # 警告：此函數是簡化版本，可能對一些特殊名稱（如 Jrue Holiday）無效
     name_parts = player_name.lower().split()
     if len(name_parts) >= 2:
         return f"{name_parts[-1][:5]}{name_parts[0][:2]}01"
@@ -104,39 +100,38 @@ def get_bbr_advanced_data(player_name, season):
         return {'PER': 'N/A', 'VORP': 'N/A', 'ScrapeStatus': '無法生成 Slug'}
         
     # 格式化賽季年份 (BBR 用結束年份，例如 2023-24 -> 2024)
-    end_year = season.split('-')[-1]
+    end_year = str(int(season.split('-')[-1]))
     
-    # BBR 進階數據頁面的 URL
-    url = f"{BBR_BASE_URL}/players/{player_slug[0]}/{player_slug}/?req_url=1&sr=1"
+    # BBR 進階數據頁面的 URL (使用進階數據總頁面)
+    url = f"{BBR_BASE_URL}/players/{player_slug[0]}/{player_slug}.html"
 
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     
-    # 遵守爬蟲倫理：設置延遲
-    time.sleep(BBR_DELAY) 
+    time.sleep(BBR_DELAY) # 遵守爬蟲倫理：設置延遲
 
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
             return {'PER': 'N/A', 'VORP': 'N/A', 'ScrapeStatus': f"爬蟲失敗 (Code: {response.status_code})"}
 
-        # 這裡使用 Pandas 讀取 HTML 中的表格 (這是爬取 BBR 的標準優雅方式)
-        # BBR 將表格隱藏在註釋中，需要用 BeautifulSoup 進行預處理，但為了Streamlit穩定性，這裡嘗試直接讀取
-        
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 尋找進階數據表格 (Advanced Table ID 通常是 'per_minute' 或 'advanced')
-        # 由於 BBR 結構複雜，我們查找所有表格並嘗試讀取 "Advanced" 表
+        # BBR 將進階數據表隱藏在 HTML 註釋中，需要特殊處理
+        # 尋找註釋中的 'advanced' 表格
+        advanced_table_html = None
+        for comment in soup.find_all(string=lambda t: isinstance(t, str) and 'advanced' in t):
+            advanced_table_html = str(comment).replace('', '')
+            break
         
-        # 核心爬蟲步驟：讀取表格數據
-        tables = pd.read_html(response.text)
-        
-        advanced_df = None
-        for table in tables:
-            if 'PER' in table.columns:
-                advanced_df = table
-                break
-        
-        if advanced_df is not None:
+        if advanced_table_html:
+            # 使用 pandas 讀取 HTML 表格
+            df_list = pd.read_html(advanced_table_html)
+            advanced_df = df_list[0] if df_list else None
+        else:
+            # 如果沒有找到註釋中的表格
+            advanced_df = None
+
+        if advanced_df is not None and 'PER' in advanced_df.columns:
             # 篩選出目標賽季的數據
             season_row = advanced_df[advanced_df['Season'] == season]
             
@@ -164,9 +159,8 @@ def get_player_report(player_name, season='2023-24'):
     """獲取並整理特定球員的狀態報告數據。"""
     player_id = get_player_id(player_name)
     
-    # --- 獲取 BBR 進階數據 (傳統爬蟲) ---
+    # 獲取 BBR 進階數據 (傳統爬蟲)
     bbr_info = get_bbr_advanced_data(player_name, season) 
-    # ------------------------------------
 
     if not player_id:
         return {
@@ -176,8 +170,9 @@ def get_player_report(player_name, season='2023-24'):
             'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
             'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season,
-            'bbr_status': bbr_info['ScrapeStatus'], # 包含爬蟲狀態
             'bbr_per': bbr_info['PER'],
+            'bbr_vorp': bbr_info['VORP'],
+            'bbr_status': bbr_info['ScrapeStatus'],
         }
 
     try:
@@ -188,11 +183,11 @@ def get_player_report(player_name, season='2023-24'):
         stats_data = stats.get_data_frames()[0]
         career_totals_df = stats.get_data_frames()[1] 
         season_stats = stats_data[stats_data['SEASON_ID'] == season]
-        awards = playerawards.PlayerAwards(player_id=player_id)
+        awards = playerawards.Awards(player_id=player_id)
         awards_df = awards.get_data_frames()[0]
         
         report = {}
-        # ... (基本資訊與數據計算邏輯保持不變)
+        # ... (基本資訊與球隊邏輯保持不變)
         generic_pos = info_df.loc[0, 'POSITION']
         report['name'] = info_df.loc[0, 'DISPLAY_FIRST_LAST']
         
@@ -244,12 +239,27 @@ def get_player_report(player_name, season='2023-24'):
                 career_avg = {}
                 total_gp_career = career_totals_df.loc[0, 'GP']
                 
-                # 計算 Delta (邏輯已在前面提供)
-                # ...
+                # 計算生涯平均
+                career_avg['pts'] = round(career_totals_df.loc[0, 'PTS'] / total_gp_career, 1)
+                career_avg['reb'] = round(career_totals_df.loc[0, 'REB'] / total_gp_career, 1)
+                career_avg['ast'] = round(career_totals_df.loc[0, 'AST'] / total_gp_career, 1)
                 
+                # 1. 計算 Delta
+                delta_pts = report['pts'] - career_avg['pts']
+                delta_reb = report['reb'] - career_avg['reb']
+                delta_ast = report['ast'] - career_avg['ast']
+
+                # 2. 判斷趨勢狀態
+                if delta_pts >= 3.0: trend_status = "🚀 上升期 (Career Ascending)"
+                elif abs(delta_pts) < 1.0: trend_status = "📈 巔峰期穩定 (Stable Peak Performance)"
+                elif delta_pts < -3.0: trend_status = "📉 下滑期 (Performance Decline)"
+                else: trend_status = "📊 表現波動 (Fluctuating Performance)"
+
                 report['trend_analysis'] = {
-                    # ... (Delta 數據已在前面提供)
-                    'trend_status': '📊 表現波動 (Fluctuating Performance)',
+                    'delta_pts': f"{'+' if delta_pts > 0 else ''}{round(delta_pts, 1)}",
+                    'delta_reb': f"{'+' if delta_reb > 0 else ''}{round(delta_reb, 1)}",
+                    'delta_ast': f"{'+' if delta_ast > 0 else ''}{round(delta_ast, 1)}",
+                    'trend_status': trend_status,
                 }
             else:
                  report['trend_analysis'] = {'trend_status': '無法計算生涯趨勢', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
@@ -268,6 +278,7 @@ def get_player_report(player_name, season='2023-24'):
 
         # --- 整合 BBR 數據 ---
         report['bbr_per'] = bbr_info['PER']
+        report['bbr_vorp'] = bbr_info['VORP']
         report['bbr_status'] = bbr_info['ScrapeStatus']
         
         # ... (獎項列表邏輯保持不變)
@@ -288,13 +299,13 @@ def get_player_report(player_name, season='2023-24'):
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
             'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season,
             'bbr_per': 'N/A',
-            'bbr_status': 'API 失敗導致跳過爬蟲',
+            'bbr_vorp': 'N/A',
+            'bbr_status': 'NBA API 失敗導致跳過 BBR 爬蟲',
         }
 
 # ======================================
 # IV. 報告格式化與輸出
 # ======================================
-# ... (此處省略 analyze_style 函數，請確保它存在於 app.py 中)
 
 def format_report_markdown_streamlit(data):
     """將整理後的數據格式化為 Markdown 報告 (Streamlit 直接渲染)"""
@@ -310,12 +321,13 @@ def format_report_markdown_streamlit(data):
 
     # 設置 BBR 狀態提示
     bbr_status_text = ""
-    if data['bbr_per'] != 'N/A':
+    if data['bbr_per'] != 'N/A' and data['bbr_status'] == '成功':
         bbr_per_text = f"* 球員效率值 (PER): **{data['bbr_per']}**"
+        bbr_vorp_text = f"* VORP 值: **{data['bbr_vorp']}**"
     else:
-        bbr_per_text = "* 球員效率值 (PER): **數據獲取失敗**"
-        bbr_status_text = f"  * 數據狀態：**{data['bbr_status']}**"
-
+        bbr_per_text = f"* 球員效率值 (PER): **無法獲取**"
+        bbr_vorp_text = f"* VORP 值: **無法獲取**"
+        bbr_status_text = f"\n  * **傳統爬蟲狀態：** {data['bbr_status']}"
 
     markdown_text = f"""
 ## ⚡ {data['name']} ({data['team_abbr']}) 狀態報告 
@@ -329,6 +341,7 @@ def format_report_markdown_streamlit(data):
 
 **📊 {data['season']} 賽季平均數據:**
 {bbr_per_text}
+{bbr_vorp_text}
 {bbr_status_text}
 * 場均上場時間 (MIN): **{data['min_per_game']}**
 * 場均得分 (PTS): **{data['pts']}**
