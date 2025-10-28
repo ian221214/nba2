@@ -15,7 +15,7 @@ from nba_api.stats.endpoints import (
 
 # 設置 Reddit 爬蟲參數
 REDDIT_BASE_URL = "https://www.reddit.com/r/nba/search/?q="
-CRAWL_DELAY = 3 # 設置延遲，遵守爬蟲倫理
+CRAWL_DELAY = 5 # 設置延遲，遵守爬蟲倫理
 
 # ====================================================================
 # I. 數據獲取與處理的核心邏輯
