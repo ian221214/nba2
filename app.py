@@ -15,10 +15,10 @@ from nba_api.stats.endpoints import (
 )
 
 # 設置 PTT 爬蟲參數
-PTT_BASE_URL = "https://www.ptt.cc/bbs/NBA/search?q="
+PTT_BASE_URL = "https://www.ptt.cc/bbs/NBA/search/?q="
 CRAWL_DELAY = 1.5 # 降低延遲到 1.5 秒，嘗試提高爬取速度
 MAX_PAGES_TO_CRAWL = 1 # 保持只爬取第一頁 (結構穩定)
-MAX_POSTS_FOR_5_STARS = 50 # <-- 新增：設定 5 顆星的軟上限 (文章數)
+MAX_POSTS_FOR_5_STARS = 20 # <-- 修正：將 5 顆星的上限調整為 20 篇文章
 
 # ====================================================================
 # I. 數據獲取與處理的核心邏輯
@@ -85,7 +85,7 @@ def analyze_style(stats, position):
 
 def map_posts_to_stars(total_posts):
     """將總文章數轉換為 1-5 星視覺評級。"""
-    # 計算星級 (最高 50 篇文章等於 5 顆星)
+    # 邏輯：最高 20 篇文章等於 5 顆星。
     star_count = min(5, max(1, round(total_posts / MAX_POSTS_FOR_5_STARS * 5)))
     return "⭐" * star_count
 
@@ -95,8 +95,6 @@ def get_ptt_data(player_name):
     
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     search_query = requests.utils.quote(player_name)
-    
-    # 這裡只爬取一頁，但可以通過頁碼擴展來增加文章數
     url = f"{PTT_BASE_URL}{search_query}" 
 
     time.sleep(CRAWL_DELAY) # 遵守爬蟲倫理
@@ -104,7 +102,7 @@ def get_ptt_data(player_name):
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            return {'hot_index': '爬蟲失敗 (無法連接 PTT)', 'top_tags': '無法連接 PTT 數據源'}
+            return {'hot_index': f"爬蟲失敗 (Code: {response.status_code})", 'top_tags': '無法連接 PTT 數據源'}
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
@@ -113,7 +111,6 @@ def get_ptt_data(player_name):
         
         # 提取常見爭議點 (Top Tags): 分析所有文章的標題
         tag_counts = {}
-        
         for post in all_posts:
             title_tag = post.find('div', class_='title')
             if title_tag and title_tag.a:
@@ -131,9 +128,8 @@ def get_ptt_data(player_name):
         
         # 格式化 Top Tags (確保至少有兩個標籤)
         sorted_tags = sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)
-        top_tags = [tag for tag, count in sorted_tags] # 取所有標籤
+        top_tags = [tag for tag, count in sorted_tags]
 
-        # 確保有至少兩個標籤的輸出 (如果不足，則補上 '一般討論')
         if len(top_tags) == 0:
             final_tags = ['無近期主要話題', '一般討論']
         elif len(top_tags) == 1:
@@ -270,8 +266,7 @@ def get_player_report(player_name, season='2023-24'):
         else:
             # 無數據時的 N/A 設置
             report.update({
-                'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A',
-                'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 'contract_year': 'N/A', 'salary': 'N/A', 'season': f"無 {season} 賽季數據",
+                'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 'contract_year': 'N/A', 'salary': 'N/A', 'season': f"無 {season} 賽季數據",
             })
             report['trend_analysis'] = {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
@@ -384,6 +379,7 @@ with st.sidebar:
     if st.button("🔍 生成報告"):
         if player_name_input:
             with st.spinner(f'正在爬取 {player_name_input} 的 {season_input} 數據...'):
+                # 注意：這裡會先執行 NBA API 爬蟲，然後是 PTT 爬蟲
                 report_data = get_player_report(player_name_input, season_input)
                 markdown_output = format_report_markdown_streamlit(report_data)
                 
