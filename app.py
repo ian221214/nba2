@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# NBA Player Report Streamlit App - Final and Stable Version (PTT 5-Star Rating)
+# NBA Player Report Streamlit App - Final and Stable Version (PTT Optimized)
 
 import pandas as pd
 import streamlit as st
@@ -16,11 +16,12 @@ from nba_api.stats.endpoints import (
 
 # 設置 PTT 爬蟲參數
 PTT_BASE_URL = "https://www.ptt.cc/bbs/NBA/search?q="
-CRAWL_DELAY = 1.5 # 降低延遲到 1.5 秒，嘗試提高爬取速度，但仍需謹慎
-MAX_PAGES_TO_CRAWL = 3 # <-- 新增：爬取 3 頁數據
+CRAWL_DELAY = 1.5 # 降低延遲到 1.5 秒，嘗試提高爬取速度
+MAX_PAGES_TO_CRAWL = 1 # 保持只爬取第一頁 (結構穩定)
+MAX_POSTS_FOR_5_STARS = 50 # <-- 新增：設定 5 顆星的軟上限 (文章數)
 
 # ====================================================================
-# I. 數據獲取與處理的核心邏輯 (略)
+# I. 數據獲取與處理的核心邏輯
 # ====================================================================
 
 @st.cache_data
@@ -37,7 +38,7 @@ def get_player_id(player_name):
         return None
 
 def get_precise_positions(generic_position):
-    """將 NBA API 返回的通用位置（Guard, F-C 等）轉換為所有精確位置（PG, SG, SF, PF, C）。"""
+    """將 NBA API 返回的通用位置轉換為所有精確位置（PG, SG, SF, PF, C）。"""
     position_map = {
         'Guard': ['PG', 'SG'], 'Forward': ['SF', 'PF'], 'Center': ['C'],
         'G-F': ['PG', 'SG', 'SF'], 'F-G': ['SG', 'SF', 'PF'], 'F-C': ['SF', 'PF', 'C'],
@@ -83,17 +84,10 @@ def analyze_style(stats, position):
 # ======================================
 
 def map_posts_to_stars(total_posts):
-    """將總文章數轉換為 1-5 星評級。"""
-    if total_posts >= 45:
-        return "⭐⭐⭐⭐⭐ (極熱門)"
-    elif total_posts >= 30:
-        return "⭐⭐⭐⭐ (熱門)"
-    elif total_posts >= 15:
-        return "⭐⭐⭐ (中度討論)"
-    elif total_posts >= 5:
-        return "⭐⭐ (低度討論)"
-    else:
-        return "⭐ (極低)"
+    """將總文章數轉換為 1-5 星視覺評級。"""
+    # 計算星級 (最高 50 篇文章等於 5 顆星)
+    star_count = min(5, max(1, round(total_posts / MAX_POSTS_FOR_5_STARS * 5)))
+    return "⭐" * star_count
 
 @st.cache_data(ttl=3600 * 3) # 限制每 3 小時爬取一次，避免頻繁請求
 def get_ptt_data(player_name):
@@ -101,9 +95,8 @@ def get_ptt_data(player_name):
     
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     search_query = requests.utils.quote(player_name)
-    all_posts = []
     
-    # PTT 網頁版的搜尋結果 URL 結構複雜，我們只爬取第一頁
+    # 這裡只爬取一頁，但可以通過頁碼擴展來增加文章數
     url = f"{PTT_BASE_URL}{search_query}" 
 
     time.sleep(CRAWL_DELAY) # 遵守爬蟲倫理
@@ -115,14 +108,11 @@ def get_ptt_data(player_name):
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 查找文章列表 (r-ent 類別)
-        all_posts.extend(soup.find_all('div', {'class': 'r-ent'}))
-        
+        all_posts = soup.find_all('div', {'class': 'r-ent'})
         total_posts = len(all_posts)
         
         # 提取常見爭議點 (Top Tags): 分析所有文章的標題
         tag_counts = {}
-        processed_tags = 0
         
         for post in all_posts:
             title_tag = post.find('div', class_='title')
@@ -134,24 +124,22 @@ def get_ptt_data(player_name):
                     tag_counts['交易/合約傳聞'] = tag_counts.get('交易/合約傳聞', 0) + 1
                 if 'MVP' in title or '新人王' in title:
                     tag_counts['年度獎項討論'] = tag_counts.get('年度獎項討論', 0) + 1
-                if '爛' in title or '黑洞' in title or '鐵' in title:
+                if '爛' in title or '鐵' in title:
                     tag_counts['表現低迷批判'] = tag_counts.get('表現低迷批判', 0) + 1
                 if '狂' in title or '神' in title or '絕殺' in title:
                     tag_counts['高光表現讚賞'] = tag_counts.get('高光表現讚賞', 0) + 1
-                
-                processed_tags += 1
-                if processed_tags >= 30: break # 限制分析的文章數量
         
-        # 格式化 Top Tags
+        # 格式化 Top Tags (確保至少有兩個標籤)
         sorted_tags = sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)
-        # 確保至少有兩個標籤，如果不足則補上
-        top_tags = [tag for tag, count in sorted_tags[:2]] # 取前 2 個
+        top_tags = [tag for tag, count in sorted_tags] # 取所有標籤
+
+        # 確保有至少兩個標籤的輸出 (如果不足，則補上 '一般討論')
         if len(top_tags) == 0:
-            final_tags = ['無近期主要話題', '無']
+            final_tags = ['無近期主要話題', '一般討論']
         elif len(top_tags) == 1:
-            final_tags = [top_tags[0], '無']
+            final_tags = [top_tags[0], '一般討論']
         else:
-            final_tags = top_tags
+            final_tags = top_tags[:2] # 取前 2 個
             
         return {
             'hot_index': map_posts_to_stars(total_posts),
@@ -160,6 +148,7 @@ def get_ptt_data(player_name):
 
     except Exception as e:
         return {'hot_index': '爬蟲發生錯誤', 'top_tags': f'數據獲取失敗: {type(e).__name__}'}
+
 
 # ======================================
 # III. 主數據獲取函數 (整合爬蟲)
@@ -274,6 +263,9 @@ def get_player_report(player_name, season='2023-24'):
             else:
                  report['trend_analysis'] = {'trend_status': '無法計算生涯趨勢', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
+            # 薪資資訊 (佔位符)
+            report['contract_year'] = '數據源無法獲取'
+            report['salary'] = '數據源無法獲取'
             report['season'] = season
         else:
             # 無數據時的 N/A 設置
@@ -335,14 +327,6 @@ def format_report_markdown_streamlit(data):
 
 **🗺️ 可打位置:** **{data['precise_positions']}**
 
----
-
-**🔥 社群輿情分析 (PTT NBA 板):**
-* **熱度指數:** {data['reddit_hot_index']}
-* **主要爭議點/話題:** **{data['reddit_top_tags']}**
-
----
-
 **📊 {data['season']} 賽季平均數據:**
 * 場均上場時間 (MIN): **{data['min_per_game']}**
 * 場均得分 (PTS): **{data['pts']}**
@@ -354,6 +338,12 @@ def format_report_markdown_streamlit(data):
 * 投籃命中率 (FG%): **{data['fg_pct']}%**
 * 罰球命中率 (FT%): **{data['ft_pct']}%**
 * 場均罰球數 (FTA): **{data['fta_per_game']}**
+
+---
+
+**🔥 社群輿情分析 (PTT NBA 板):**
+* **熱度指數:** {data['reddit_hot_index']}
+* **主要爭議點/話題:** **{data['reddit_top_tags']}**
 
 ---
 
