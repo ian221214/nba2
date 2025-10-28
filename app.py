@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# NBA Player Report Streamlit App - Final and Stable Version (COMPLETE)
+# NBA Player Report Streamlit App - Final Version with PTT Scraping
 
 import pandas as pd
 import streamlit as st
@@ -13,9 +13,9 @@ from nba_api.stats.endpoints import (
     playercareerstats, 
 )
 
-# 設置 Reddit 爬蟲參數
-REDDIT_BASE_URL = "https://www.reddit.com/r/nba/search/?q="
-CRAWL_DELAY = 5 # 設置延遲，遵守爬蟲倫理
+# 設置 PTT 爬蟲參數
+PTT_BASE_URL = "https://www.ptt.cc/bbs/NBA/search?q="
+CRAWL_DELAY = 3 # <-- 設置延遲，遵守爬蟲倫理
 
 # ====================================================================
 # I. 數據獲取與處理的核心邏輯
@@ -35,7 +35,7 @@ def get_player_id(player_name):
         return None
 
 def get_precise_positions(generic_position):
-    """將 NBA API 返回的通用位置轉換為所有精確位置。"""
+    """將 NBA API 返回的通用位置轉換為所有精確位置（PG, SG, SF, PF, C）。"""
     position_map = {
         'Guard': ['PG', 'SG'], 'Forward': ['SF', 'PF'], 'Center': ['C'],
         'G-F': ['PG', 'SG', 'SF'], 'F-G': ['SG', 'SF', 'PF'], 'F-C': ['SF', 'PF', 'C'],
@@ -77,45 +77,53 @@ def analyze_style(stats, position):
     return {'core_style': core_style, 'simple_rating': simple_rating}
 
 # ======================================
-# II. 傳統爬蟲函數 (Reddit)
+# II. PTT 傳統爬蟲函數 (Web Scraping)
 # ======================================
 
 @st.cache_data(ttl=3600 * 3) # 限制每 3 小時爬取一次，避免頻繁請求
-def get_reddit_data(player_name):
-    """執行 Reddit 爬蟲，獲取熱度和爭議點。"""
+def get_ptt_data(player_name):
+    """執行 PTT 爬蟲，獲取 NBA 板的熱度和話題。"""
     
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.88 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     search_query = requests.utils.quote(player_name)
-    url = f"{REDDIT_BASE_URL}{search_query}&sort=new&t=week" # 搜尋過去一週的帖子
+    url = f"{PTT_BASE_URL}{search_query}" # PTT 搜尋 URL
 
     time.sleep(CRAWL_DELAY) # 遵守爬蟲倫理
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
+        # PTT 網頁版通常在成功時返回 200
         if response.status_code != 200:
-            return {'hot_index': '爬蟲失敗 (HTTP Code)', 'top_tags': '無法連接 Reddit 數據源'}
+            return {'hot_index': f"爬蟲失敗 (Code: {response.status_code})", 'top_tags': '無法連接 PTT 數據源'}
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        posts = soup.find_all('div', {'class': 'Post'})
-        total_posts = len(posts)
+        # 尋找文章列表 (使用通用的 r-ent 類別，這是 PTT 列表的結構)
+        posts = soup.find_all('div', {'class': 'r-ent'})
         
+        total_posts = len(posts) # 總文章數
+        
+        # 提取常見爭議點 (Top Tags): 分析前 10 篇文章的標題
         tag_counts = {}
-        for post in posts[:10]: # 只分析前 10 個帖子
-            title = post.find('h3').text if post.find('h3') else ''
-            
-            if 'trade' in title.lower() or '交易' in title.lower():
-                tag_counts['Trade Rumor'] = tag_counts.get('Trade Rumor', 0) + 1
-            if 'mvp' in title.lower():
-                tag_counts['MVP Candidate'] = tag_counts.get('MVP Candidate', 0) + 1
-            if 'defense' in title.lower() or '防守' in title.lower():
-                tag_counts['Defensive Anchor'] = tag_counts.get('Defensive Anchor', 0) + 1
+        for post in posts[:10]:
+            title_tag = post.find('div', class_='title')
+            if title_tag and title_tag.a:
+                title = title_tag.a.text
+                
+                # 簡易爭議詞彙統計 (可以根據報告需求增加或修改)
+                if '交易' in title or '合約' in title:
+                    tag_counts['交易/合約傳聞'] = tag_counts.get('交易/合約傳聞', 0) + 1
+                if 'MVP' in title or '新人王' in title:
+                    tag_counts['年度獎項討論'] = tag_counts.get('年度獎項討論', 0) + 1
+                if '鐵' in title or '爛' in title:
+                    tag_counts['表現低迷批判'] = tag_counts.get('表現低迷批判', 0) + 1
         
+        # 格式化 Top Tags
         top_tags = [tag for tag, count in sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)]
         
         return {
-            'hot_index': f"過去一週帖子數量：{total_posts}",
-            'top_tags': ", ".join(top_tags) if top_tags else '無主要爭議點'
+            'hot_index': f"搜尋結果文章數：{total_posts}",
+            'top_tags': ", ".join(top_tags) if top_tags else '無近期主要話題'
         }
 
     except Exception as e:
@@ -129,22 +137,21 @@ def get_player_report(player_name, season='2023-24'):
     """獲取並整理特定球員的狀態報告數據。"""
     player_id = get_player_id(player_name)
     
-    # 獲取社群數據 (Reddit 爬蟲) - 必須在 try/except 之外，以確保它在失敗時不會崩潰
-    reddit_info = get_reddit_data(player_name) 
+    # 獲取社群數據 (PTT 爬蟲) 
+    reddit_info = get_ptt_data(player_name) # <-- 呼叫 PTT 爬蟲
 
     if not player_id:
-        # VVVVVV 修正：找不到球員時返回包含 Reddit 數據的安全字典 VVVVVV
+        # 修正：找不到球員時返回包含 PTT 數據的安全字典
         return {
             'error': f"找不到球員：{player_name}。請檢查姓名是否正確。",
             'name': player_name, 'team_abbr': 'N/A', 'team_full': 'N/A', 'precise_positions': 'N/A', 
             'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 
             'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
-            'reddit_hot_index': reddit_info['hot_index'],
+            'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season,
+            'reddit_hot_index': reddit_info['hot_index'], 
             'reddit_top_tags': reddit_info['top_tags'],
-            'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season
         }
-        # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     try:
         # 1. 獲取官方統計數據 (NBA API)
@@ -235,15 +242,19 @@ def get_player_report(player_name, season='2023-24'):
             else:
                  report['trend_analysis'] = {'trend_status': '無法計算生涯趨勢', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
+            # 薪資資訊 (佔位符)
+            report['contract_year'] = '數據源無法獲取'
+            report['salary'] = '數據源無法獲取'
             report['season'] = season
         else:
-            # ... (N/A 設置邏輯)
+            # 無數據時的 N/A 設置
             report.update({
-                'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 'season': f"無 {season} 賽季數據",
+                'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A',
+                'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 'contract_year': 'N/A', 'salary': 'N/A', 'season': f"無 {season} 賽季數據",
             })
             report['trend_analysis'] = {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
-        # --- 整合 Reddit 數據 ---
+        # --- 整合 PTT 數據 ---
         report['reddit_hot_index'] = reddit_info['hot_index']
         report['reddit_top_tags'] = reddit_info['top_tags']
         
@@ -262,9 +273,9 @@ def get_player_report(player_name, season='2023-24'):
             'error': f"數據處理失敗，詳細錯誤: {e}",
             'name': player_name, 'team_abbr': 'ERR', 'team_full': 'API Error', 'precise_positions': 'N/A', 
             'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 
-            'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 
+            'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A',
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
-            'reddit_hot_index': reddit_info['hot_index'], # 確保 Reddit 數據在錯誤報告中仍然顯示
+            'reddit_hot_index': reddit_info['hot_index'], # 確保 PTT 數據在錯誤報告中仍然顯示
             'reddit_top_tags': reddit_info['top_tags'],
             'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season
         }
@@ -272,12 +283,13 @@ def get_player_report(player_name, season='2023-24'):
 
 
 # ======================================
-# V. 報告格式化與輸出
+# IV. 報告格式化與輸出
 # ======================================
 
 def format_report_markdown_streamlit(data):
     """將整理後的數據格式化為 Markdown 報告 (Streamlit 直接渲染)"""
     if data.get('error'):
+        # 錯誤報告邏輯
         return f"## ❌ 錯誤報告\n\n{data['error']}"
 
     style_analysis = analyze_style(data, data.get('position', 'N/A'))
@@ -297,8 +309,8 @@ def format_report_markdown_streamlit(data):
 
 ---
 
-**🔥 社群輿情分析 (Reddit r/nba):**
-* **熱度指數 (上週):** {data['reddit_hot_index']}
+**🔥 社群輿情分析 (PTT NBA 板):**
+* **熱度指數:** {data['reddit_hot_index']}
 * **主要爭議點/話題:** **{data['reddit_top_tags']}**
 
 ---
@@ -337,7 +349,7 @@ def format_report_markdown_streamlit(data):
     return markdown_text
 
 # ====================================================================
-# VI. Streamlit 界面邏輯 (運行部分)
+# V. Streamlit 界面邏輯 (運行部分)
 # ====================================================================
 
 # 設定頁面
@@ -354,7 +366,6 @@ with st.sidebar:
     if st.button("🔍 生成報告"):
         if player_name_input:
             with st.spinner(f'正在爬取 {player_name_input} 的 {season_input} 數據...'):
-                # 注意：這裡會先執行 NBA API 爬蟲，然後是 Reddit 爬蟲
                 report_data = get_player_report(player_name_input, season_input)
                 markdown_output = format_report_markdown_streamlit(report_data)
                 
