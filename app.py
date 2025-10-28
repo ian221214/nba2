@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
-# NBA Player Report Streamlit App - Final and Stable Version (Corrected Key Error)
+# NBA Player Report Streamlit App - Final and Stable Version (COMPLETE)
 
 import pandas as pd
 import streamlit as st
+import requests # <-- 傳統爬蟲庫
+from bs4 import BeautifulSoup # <-- 傳統爬蟲庫
+import time # <-- 爬蟲倫理延遲
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import (
     playerawards, 
     commonplayerinfo, 
     playercareerstats, 
 )
+
+# 設置 Reddit 爬蟲參數
+REDDIT_BASE_URL = "https://www.reddit.com/r/nba/search/?q="
+CRAWL_DELAY = 3 # 設置延遲，遵守爬蟲倫理
 
 # ====================================================================
 # I. 數據獲取與處理的核心邏輯
@@ -28,7 +35,7 @@ def get_player_id(player_name):
         return None
 
 def get_precise_positions(generic_position):
-    """將 NBA API 返回的通用位置（Guard, F-C 等）轉換為所有精確位置（PG, SG, SF, PF, C）。"""
+    """將 NBA API 返回的通用位置轉換為所有精確位置。"""
     position_map = {
         'Guard': ['PG', 'SG'], 'Forward': ['SF', 'PF'], 'Center': ['C'],
         'G-F': ['PG', 'SG', 'SF'], 'F-G': ['SG', 'SF', 'PF'], 'F-C': ['SF', 'PF', 'C'],
@@ -39,38 +46,119 @@ def get_precise_positions(generic_position):
         return ", ".join(positions)
     return generic_position
 
+def analyze_style(stats, position):
+    """根據場均數據和位置，生成簡單的球員風格分析。（用於報告顯示）"""
+    try:
+        pts = float(stats.get('pts', 0))
+        ast = float(stats.get('ast', 0))
+        reb = float(stats.get('reb', 0))
+    except ValueError:
+        return {'core_style': '數據不足，無法分析', 'simple_rating': '請嘗試查詢有數據的賽季。'}
+
+    HIGH_PTS, HIGH_AST, HIGH_REB = 25, 8, 10
+    core_style, simple_rating = "角色球員", "可靠的輪換球員。"
+    
+    if pts >= HIGH_PTS and ast >= 6 and reb >= 6:
+        core_style = "🌟 頂級全能巨星 (Elite All-Around Star)"
+        simple_rating = "集得分、組織和籃板於一身的劃時代球員。"
+    elif pts >= HIGH_PTS:
+        core_style = "得分機器 (Volume Scorer)"
+        simple_rating = "聯盟頂級的得分手，能夠在任何位置取分。"
+    elif ast >= HIGH_AST and pts >= 15:
+        core_style = "🎯 組織大師 (Playmaking Maestro)"
+        simple_rating = "以傳球優先的組織核心，同時具備可靠的得分能力。"
+    elif reb >= HIGH_REB and pts < 15:
+        core_style = "🧱 籃板/防守支柱 (Rebounding/Defense Anchor)"
+        simple_rating = "內線防守和籃板的專家，隊伍的堅實後盾。"
+    else:
+        core_style = "角色球員 (Role Player)"
+        simple_rating = "一名可靠的輪換球員。"
+
+    return {'core_style': core_style, 'simple_rating': simple_rating}
+
+# ======================================
+# II. 傳統爬蟲函數 (Reddit)
+# ======================================
+
+@st.cache_data(ttl=3600 * 3) # 限制每 3 小時爬取一次，避免頻繁請求
+def get_reddit_data(player_name):
+    """執行 Reddit 爬蟲，獲取熱度和爭議點。"""
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.88 Safari/537.36'}
+    search_query = requests.utils.quote(player_name)
+    url = f"{REDDIT_BASE_URL}{search_query}&sort=new&t=week" # 搜尋過去一週的帖子
+
+    time.sleep(CRAWL_DELAY) # 遵守爬蟲倫理
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return {'hot_index': '爬蟲失敗 (HTTP Code)', 'top_tags': '無法連接 Reddit 數據源'}
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        posts = soup.find_all('div', {'class': 'Post'})
+        total_posts = len(posts)
+        
+        tag_counts = {}
+        for post in posts[:10]: # 只分析前 10 個帖子
+            title = post.find('h3').text if post.find('h3') else ''
+            
+            if 'trade' in title.lower() or '交易' in title.lower():
+                tag_counts['Trade Rumor'] = tag_counts.get('Trade Rumor', 0) + 1
+            if 'mvp' in title.lower():
+                tag_counts['MVP Candidate'] = tag_counts.get('MVP Candidate', 0) + 1
+            if 'defense' in title.lower() or '防守' in title.lower():
+                tag_counts['Defensive Anchor'] = tag_counts.get('Defensive Anchor', 0) + 1
+        
+        top_tags = [tag for tag, count in sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)]
+        
+        return {
+            'hot_index': f"過去一週帖子數量：{total_posts}",
+            'top_tags': ", ".join(top_tags) if top_tags else '無主要爭議點'
+        }
+
+    except Exception as e:
+        return {'hot_index': '爬蟲發生錯誤', 'top_tags': f'數據獲取失敗: {type(e).__name__}'}
+
+# ======================================
+# III. 主數據獲取函數 (整合爬蟲)
+# ======================================
+
 def get_player_report(player_name, season='2023-24'):
     """獲取並整理特定球員的狀態報告數據。"""
     player_id = get_player_id(player_name)
+    
+    # 獲取社群數據 (Reddit 爬蟲) - 必須在 try/except 之外，以確保它在失敗時不會崩潰
+    reddit_info = get_reddit_data(player_name) 
+
     if not player_id:
-        # VVVVVV 修正：確保返回的字典包含所有鍵 VVVVVV
+        # VVVVVV 修正：找不到球員時返回包含 Reddit 數據的安全字典 VVVVVV
         return {
             'error': f"找不到球員：{player_name}。請檢查姓名是否正確。",
-            'name': '找不到球員', 'team_abbr': 'N/A', 'team_full': 'N/A', 'precise_positions': 'N/A', 
+            'name': player_name, 'team_abbr': 'N/A', 'team_full': 'N/A', 'precise_positions': 'N/A', 
             'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 
-            'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A',
+            'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
+            'reddit_hot_index': reddit_info['hot_index'],
+            'reddit_top_tags': reddit_info['top_tags'],
             'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season
         }
         # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     try:
-        # 1. 獲取基本資訊
+        # 1. 獲取官方統計數據 (NBA API)
         info = commonplayerinfo.CommonPlayerInfo(player_id=player_id)
         info_df = info.get_data_frames()[0]
-        
-        # 2. 獲取生涯數據（總計）
         stats = playercareerstats.PlayerCareerStats(player_id=player_id)
         stats_data = stats.get_data_frames()[0]
-        career_totals_df = stats.get_data_frames()[1] # <-- 生涯總計數據
+        career_totals_df = stats.get_data_frames()[1] 
         season_stats = stats_data[stats_data['SEASON_ID'] == season]
-        
-        # 3. 獲取獎項資訊
         awards = playerawards.PlayerAwards(player_id=player_id)
         awards_df = awards.get_data_frames()[0]
         
         report = {}
-        # --- 基本資訊 ---
+        # ... (基本資訊與數據計算邏輯保持不變)
         generic_pos = info_df.loc[0, 'POSITION']
         report['name'] = info_df.loc[0, 'DISPLAY_FIRST_LAST']
         
@@ -100,7 +188,7 @@ def get_player_report(player_name, season='2023-24'):
             report['games_played'] = int(total_gp) 
             report['pts'] = round(avg_stats['PTS'] / total_gp, 1) 
             report['reb'] = round(avg_stats['REB'] / total_gp, 1)
-            report['ast'] = round(avg_stats['AST'] / total_gp, 1)
+            report['ast'] = round(avg_stats['AST'] / total_gp, 1) 
             report['stl'] = round(avg_stats['STL'] / total_gp, 1) 
             report['blk'] = round(avg_stats['BLK'] / total_gp, 1) 
             report['tov'] = round(avg_stats['TOV'] / total_gp, 1)
@@ -133,14 +221,10 @@ def get_player_report(player_name, season='2023-24'):
                 delta_ast = report['ast'] - career_avg['ast']
 
                 # 2. 判斷趨勢狀態
-                if delta_pts >= 3.0:
-                    trend_status = "🚀 上升期 (Career Ascending)"
-                elif abs(delta_pts) < 1.0:
-                    trend_status = "📈 巔峰期穩定 (Stable Peak Performance)"
-                elif delta_pts < -3.0:
-                    trend_status = "📉 下滑期 (Performance Decline)"
-                else:
-                    trend_status = "📊 表現波動 (Fluctuating Performance)"
+                if delta_pts >= 3.0: trend_status = "🚀 上升期 (Career Ascending)"
+                elif abs(delta_pts) < 1.0: trend_status = "📈 巔峰期穩定 (Stable Peak Performance)"
+                elif delta_pts < -3.0: trend_status = "📉 下滑期 (Performance Decline)"
+                else: trend_status = "📊 表現波動 (Fluctuating Performance)"
 
                 report['trend_analysis'] = {
                     'delta_pts': f"{'+' if delta_pts > 0 else ''}{round(delta_pts, 1)}",
@@ -151,24 +235,21 @@ def get_player_report(player_name, season='2023-24'):
             else:
                  report['trend_analysis'] = {'trend_status': '無法計算生涯趨勢', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
-            # 薪資資訊 (佔位符)
-            report['contract_year'] = '數據源無法獲取'
-            report['salary'] = '數據源無法獲取'
             report['season'] = season
         else:
-            # 無數據時的 N/A 設置
+            # ... (N/A 設置邏輯)
             report.update({
-                'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A',
-                'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 
-                'contract_year': 'N/A', 'salary': 'N/A', 'season': f"無 {season} 賽季數據",
+                'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 'season': f"無 {season} 賽季數據",
             })
             report['trend_analysis'] = {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
-        # --- 獎項列表 (含年份) ---
+        # --- 整合 Reddit 數據 ---
+        report['reddit_hot_index'] = reddit_info['hot_index']
+        report['reddit_top_tags'] = reddit_info['top_tags']
+        
+        # ... (獎項列表邏輯保持不變)
         if not awards_df.empty:
-            award_pairs = awards_df[['DESCRIPTION', 'SEASON']].apply(
-                lambda x: f"{x['DESCRIPTION']} ({x['SEASON'][:4]})", axis=1
-            ).tolist()
+            award_pairs = awards_df[['DESCRIPTION', 'SEASON']].apply(lambda x: f"{x['DESCRIPTION']} ({x['SEASON'][:4]})", axis=1).tolist()
             report['awards'] = award_pairs
         else:
             report['awards'] = []
@@ -176,58 +257,27 @@ def get_player_report(player_name, season='2023-24'):
         return report
 
     except Exception as e:
-        # VVVVVV 【關鍵修正：API 失敗時返回的安全字典】 VVVVVV
+        # VVVVVV 【最終修正：API 失敗時返回安全字典】 VVVVVV
         return {
             'error': f"數據處理失敗，詳細錯誤: {e}",
             'name': player_name, 'team_abbr': 'ERR', 'team_full': 'API Error', 'precise_positions': 'N/A', 
             'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 
-            'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A',
+            'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A', 
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
+            'reddit_hot_index': reddit_info['hot_index'], # 確保 Reddit 數據在錯誤報告中仍然顯示
+            'reddit_top_tags': reddit_info['top_tags'],
             'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season
         }
         # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
 # ======================================
-# 輔助函數：風格分析 (Rule-Based)
+# V. 報告格式化與輸出
 # ======================================
-# ... ( analyze_style 函數保持不變)
-
-def analyze_style(stats, position):
-    """根據場均數據和位置，生成簡單的球員風格分析。（用於報告顯示）"""
-    try:
-        pts = float(stats.get('pts', 0))
-        ast = float(stats.get('ast', 0))
-        reb = float(stats.get('reb', 0))
-    except ValueError:
-        return {'core_style': '數據不足，無法分析', 'simple_rating': '請嘗試查詢有數據的賽季。'}
-
-    HIGH_PTS, HIGH_AST, HIGH_REB = 25, 8, 10
-    core_style, simple_rating = "角色球員", "可靠的輪換球員。"
-    
-    if pts >= HIGH_PTS and ast >= 6 and reb >= 6:
-        core_style = "🌟 頂級全能巨星 (Elite All-Around Star)"
-        simple_rating = "集得分、組織和籃板於一身的劃時代球員。"
-    elif pts >= HIGH_PTS:
-        core_style = "得分機器 (Volume Scorer)"
-        simple_rating = "聯盟頂級的得分手，能夠在任何位置取分。"
-    elif ast >= HIGH_AST and pts >= 15:
-        core_style = "🎯 組織大師 (Playmaking Maestro)"
-        simple_rating = "以傳球優先的組織核心，同時具備可靠的得分能力。"
-    elif reb >= HIGH_REB and pts < 15:
-        core_style = "🧱 籃板/防守支柱 (Rebounding/Defense Anchor)"
-        simple_rating = "內線防守和籃板的專家，隊伍的堅實後盾。"
-    else:
-        core_style = "角色球員 (Role Player)"
-        simple_rating = "一名可靠的輪換球員。"
-
-    return {'core_style': core_style, 'simple_rating': simple_rating}
-
 
 def format_report_markdown_streamlit(data):
     """將整理後的數據格式化為 Markdown 報告 (Streamlit 直接渲染)"""
     if data.get('error'):
-        # 修正：錯誤發生時，直接顯示錯誤訊息
         return f"## ❌ 錯誤報告\n\n{data['error']}"
 
     style_analysis = analyze_style(data, data.get('position', 'N/A'))
@@ -244,6 +294,14 @@ def format_report_markdown_streamlit(data):
 **📅 當賽季出場數 (GP):** **{data['games_played']}**
 
 **🗺️ 可打位置:** **{data['precise_positions']}**
+
+---
+
+**🔥 社群輿情分析 (Reddit r/nba):**
+* **熱度指數 (上週):** {data['reddit_hot_index']}
+* **主要爭議點/話題:** **{data['reddit_top_tags']}**
+
+---
 
 **📊 {data['season']} 賽季平均數據:**
 * 場均上場時間 (MIN): **{data['min_per_game']}**
@@ -279,7 +337,7 @@ def format_report_markdown_streamlit(data):
     return markdown_text
 
 # ====================================================================
-# II. Streamlit 界面邏輯
+# VI. Streamlit 界面邏輯 (運行部分)
 # ====================================================================
 
 # 設定頁面
@@ -296,6 +354,7 @@ with st.sidebar:
     if st.button("🔍 生成報告"):
         if player_name_input:
             with st.spinner(f'正在爬取 {player_name_input} 的 {season_input} 數據...'):
+                # 注意：這裡會先執行 NBA API 爬蟲，然後是 Reddit 爬蟲
                 report_data = get_player_report(player_name_input, season_input)
                 markdown_output = format_report_markdown_streamlit(report_data)
                 
