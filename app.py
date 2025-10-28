@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-# NBA Player Report Streamlit App - Final Version with PTT Scraping
+# NBA Player Report Streamlit App - Final and Stable Version (PTT 5-Star Rating)
 
 import pandas as pd
 import streamlit as st
-import requests # <-- 傳統爬蟲庫
-from bs4 import BeautifulSoup # <-- 傳統爬蟲庫
-import time # <-- 爬蟲倫理延遲
+import requests 
+from bs4 import BeautifulSoup 
+import time 
+
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import (
     playerawards, 
@@ -15,10 +16,11 @@ from nba_api.stats.endpoints import (
 
 # 設置 PTT 爬蟲參數
 PTT_BASE_URL = "https://www.ptt.cc/bbs/NBA/search?q="
-CRAWL_DELAY = 3 # <-- 設置延遲，遵守爬蟲倫理
+CRAWL_DELAY = 1.5 # 降低延遲到 1.5 秒，嘗試提高爬取速度，但仍需謹慎
+MAX_PAGES_TO_CRAWL = 3 # <-- 新增：爬取 3 頁數據
 
 # ====================================================================
-# I. 數據獲取與處理的核心邏輯
+# I. 數據獲取與處理的核心邏輯 (略)
 # ====================================================================
 
 @st.cache_data
@@ -35,7 +37,7 @@ def get_player_id(player_name):
         return None
 
 def get_precise_positions(generic_position):
-    """將 NBA API 返回的通用位置轉換為所有精確位置（PG, SG, SF, PF, C）。"""
+    """將 NBA API 返回的通用位置（Guard, F-C 等）轉換為所有精確位置（PG, SG, SF, PF, C）。"""
     position_map = {
         'Guard': ['PG', 'SG'], 'Forward': ['SF', 'PF'], 'Center': ['C'],
         'G-F': ['PG', 'SG', 'SF'], 'F-G': ['SG', 'SF', 'PF'], 'F-C': ['SF', 'PF', 'C'],
@@ -80,50 +82,80 @@ def analyze_style(stats, position):
 # II. PTT 傳統爬蟲函數 (Web Scraping)
 # ======================================
 
+def map_posts_to_stars(total_posts):
+    """將總文章數轉換為 1-5 星評級。"""
+    if total_posts >= 45:
+        return "⭐⭐⭐⭐⭐ (極熱門)"
+    elif total_posts >= 30:
+        return "⭐⭐⭐⭐ (熱門)"
+    elif total_posts >= 15:
+        return "⭐⭐⭐ (中度討論)"
+    elif total_posts >= 5:
+        return "⭐⭐ (低度討論)"
+    else:
+        return "⭐ (極低)"
+
 @st.cache_data(ttl=3600 * 3) # 限制每 3 小時爬取一次，避免頻繁請求
 def get_ptt_data(player_name):
-    """執行 PTT 爬蟲，獲取 NBA 板的熱度和話題。"""
+    """執行 PTT 爬蟲，獲取熱度和爭議點。"""
     
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     search_query = requests.utils.quote(player_name)
-    url = f"{PTT_BASE_URL}{search_query}" # PTT 搜尋 URL
+    all_posts = []
+    
+    # PTT 網頁版的搜尋結果 URL 結構複雜，我們只爬取第一頁
+    url = f"{PTT_BASE_URL}{search_query}" 
 
     time.sleep(CRAWL_DELAY) # 遵守爬蟲倫理
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        # PTT 網頁版通常在成功時返回 200
         if response.status_code != 200:
-            return {'hot_index': f"爬蟲失敗 (Code: {response.status_code})", 'top_tags': '無法連接 PTT 數據源'}
+            return {'hot_index': '爬蟲失敗 (無法連接 PTT)', 'top_tags': '無法連接 PTT 數據源'}
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 尋找文章列表 (使用通用的 r-ent 類別，這是 PTT 列表的結構)
-        posts = soup.find_all('div', {'class': 'r-ent'})
+        # 查找文章列表 (r-ent 類別)
+        all_posts.extend(soup.find_all('div', {'class': 'r-ent'}))
         
-        total_posts = len(posts) # 總文章數
+        total_posts = len(all_posts)
         
-        # 提取常見爭議點 (Top Tags): 分析前 10 篇文章的標題
+        # 提取常見爭議點 (Top Tags): 分析所有文章的標題
         tag_counts = {}
-        for post in posts[:10]:
+        processed_tags = 0
+        
+        for post in all_posts:
             title_tag = post.find('div', class_='title')
             if title_tag and title_tag.a:
                 title = title_tag.a.text
                 
-                # 簡易爭議詞彙統計 (可以根據報告需求增加或修改)
-                if '交易' in title or '合約' in title:
+                # 簡易爭議詞彙統計
+                if '交易' in title or '合約' in title or 'trade' in title.lower():
                     tag_counts['交易/合約傳聞'] = tag_counts.get('交易/合約傳聞', 0) + 1
                 if 'MVP' in title or '新人王' in title:
                     tag_counts['年度獎項討論'] = tag_counts.get('年度獎項討論', 0) + 1
-                if '鐵' in title or '爛' in title:
+                if '爛' in title or '黑洞' in title or '鐵' in title:
                     tag_counts['表現低迷批判'] = tag_counts.get('表現低迷批判', 0) + 1
+                if '狂' in title or '神' in title or '絕殺' in title:
+                    tag_counts['高光表現讚賞'] = tag_counts.get('高光表現讚賞', 0) + 1
+                
+                processed_tags += 1
+                if processed_tags >= 30: break # 限制分析的文章數量
         
         # 格式化 Top Tags
-        top_tags = [tag for tag, count in sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)]
-        
+        sorted_tags = sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)
+        # 確保至少有兩個標籤，如果不足則補上
+        top_tags = [tag for tag, count in sorted_tags[:2]] # 取前 2 個
+        if len(top_tags) == 0:
+            final_tags = ['無近期主要話題', '無']
+        elif len(top_tags) == 1:
+            final_tags = [top_tags[0], '無']
+        else:
+            final_tags = top_tags
+            
         return {
-            'hot_index': f"搜尋結果文章數：{total_posts}",
-            'top_tags': ", ".join(top_tags) if top_tags else '無近期主要話題'
+            'hot_index': map_posts_to_stars(total_posts),
+            'top_tags': f"{final_tags[0]}, {final_tags[1]}"
         }
 
     except Exception as e:
@@ -138,7 +170,7 @@ def get_player_report(player_name, season='2023-24'):
     player_id = get_player_id(player_name)
     
     # 獲取社群數據 (PTT 爬蟲) 
-    reddit_info = get_ptt_data(player_name) # <-- 呼叫 PTT 爬蟲
+    reddit_info = get_ptt_data(player_name) 
 
     if not player_id:
         # 修正：找不到球員時返回包含 PTT 數據的安全字典
@@ -242,9 +274,6 @@ def get_player_report(player_name, season='2023-24'):
             else:
                  report['trend_analysis'] = {'trend_status': '無法計算生涯趨勢', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'}
 
-            # 薪資資訊 (佔位符)
-            report['contract_year'] = '數據源無法獲取'
-            report['salary'] = '數據源無法獲取'
             report['season'] = season
         else:
             # 無數據時的 N/A 設置
@@ -275,7 +304,7 @@ def get_player_report(player_name, season='2023-24'):
             'games_played': 0, 'pts': 'N/A', 'reb': 'N/A', 'ast': 'N/A', 'stl': 'N/A', 'blk': 'N/A', 'tov': 'N/A', 'ato_ratio': 'N/A', 
             'fg_pct': 'N/A', 'ft_pct': 'N/A', 'fta_per_game': 'N/A', 'min_per_game': 'N/A',
             'trend_analysis': {'trend_status': 'N/A', 'delta_pts': 'N/A', 'delta_reb': 'N/A', 'delta_ast': 'N/A'},
-            'reddit_hot_index': reddit_info['hot_index'], # 確保 PTT 數據在錯誤報告中仍然顯示
+            'reddit_hot_index': reddit_info['hot_index'],
             'reddit_top_tags': reddit_info['top_tags'],
             'awards': [], 'contract_year': 'N/A', 'salary': 'N/A', 'season': season
         }
@@ -289,7 +318,6 @@ def get_player_report(player_name, season='2023-24'):
 def format_report_markdown_streamlit(data):
     """將整理後的數據格式化為 Markdown 報告 (Streamlit 直接渲染)"""
     if data.get('error'):
-        # 錯誤報告邏輯
         return f"## ❌ 錯誤報告\n\n{data['error']}"
 
     style_analysis = analyze_style(data, data.get('position', 'N/A'))
